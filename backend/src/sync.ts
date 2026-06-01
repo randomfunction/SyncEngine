@@ -51,9 +51,6 @@ export class WSSharedDoc extends Y.Doc {
       encoder.set(update, 2);
       this.broadcastMessage(encoder);
 
-      // 2. Persist the update to the database asynchronously
-      // origin is usually the WebSocket connection if it came from a client
-      // or 'redis' if it came from Pub/Sub
       if (origin !== 'redis' && origin !== 'server-load') {
         appendOperation(this.name, 'server', update).catch(err => {
           console.error('Failed to append operation to DB:', err);
@@ -108,13 +105,9 @@ export async function setupWSConnection(conn: WebSocket, req: any, { docName = r
   conn.on('message', (message: ArrayBuffer) => {
     try {
       const messageView = new Uint8Array(message);
-      // We manually parse the message format expected by y-websocket
-      // First byte is message type
       const messageType = messageView[0];
       
       if (messageType === messageSync) {
-        // We use Yjs sync protocol to handle Sync Step 1, Sync Step 2, and Updates
-        // Because y-protocols uses its own custom decoding, we'll implement a simple bridge.
         const syncMessageType = messageView[1];
         if (syncMessageType === syncProtocol.messageYjsSyncStep1) {
            const stateVector = messageView.slice(2);
@@ -156,7 +149,6 @@ export async function setupWSConnection(conn: WebSocket, req: any, { docName = r
     }
   });
 
-  // Send initial Sync Step 1 to the client so they know our state
   const stateVector = Y.encodeStateVector(doc);
   const sync1 = new Uint8Array(stateVector.length + 2);
   sync1[0] = messageSync;
