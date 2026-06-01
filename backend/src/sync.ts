@@ -143,9 +143,6 @@ export async function setupWSConnection(conn: WebSocket, req: any, { docName = r
         doc.conns.delete(conn);
         awarenessProtocol.removeAwarenessStates(doc.awareness, Array.from(controlledIds), null);
       }
-      if (doc.conns.size === 0) {
-        // Optionally clean up doc from memory after a delay
-      }
     }
   });
 
