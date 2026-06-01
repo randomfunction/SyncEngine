@@ -2,7 +2,6 @@ import WebSocket from 'ws';
 import * as Y from 'yjs';
 import { encoding, decoding } from 'lib0';
 import * as syncProtocol from 'y-protocols/sync';
-import * as awarenessProtocol from 'y-protocols/awareness';
 
 const WS_URL = 'ws://localhost:8080';
 // Use a unique document ID for each benchmark run so it starts fresh
