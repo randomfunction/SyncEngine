@@ -2,8 +2,23 @@ import Fastify from 'fastify';
 import dotenv from 'dotenv';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
+import { PrismaClient } from '@prisma/client';
 
 dotenv.config();
+
+const prisma = new PrismaClient();
+async function runDiagnostics() {
+  try {
+    const opCount = await prisma.operation.count();
+    const docCount = await prisma.document.count();
+    const snapshotCount = await prisma.snapshot.count();
+    console.log(`[DB Status] Active Documents: ${docCount}, Snapshots: ${snapshotCount}, Operations: ${opCount}`);
+  } catch (err: any) {
+    console.error(`[DB Status] Connection failed: ${err.message}`);
+  }
+}
+runDiagnostics();
+
 
 import { setupWSConnection } from './sync';
 

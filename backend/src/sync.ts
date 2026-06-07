@@ -22,6 +22,7 @@ export class WSSharedDoc extends Y.Doc {
   name: string;
   conns: Map<WebSocket, Set<number>>;
   awareness: awarenessProtocol.Awareness;
+  private redisListener: (channel: any, message: any) => void;
 
   constructor(name: string) {
     super();
@@ -45,7 +46,7 @@ export class WSSharedDoc extends Y.Doc {
         encoder,
         awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients)
       );
-      this.broadcastMessage(encoding.toUint8Array(encoder));
+      this.broadcastMessage(encoding.toUint8Array(encoder), conn || undefined);
     };
 
     this.awareness.on('update', awarenessChangeHandler);
@@ -54,7 +55,9 @@ export class WSSharedDoc extends Y.Doc {
       const encoder = encoding.createEncoder();
       encoding.writeVarUint(encoder, messageSync);
       syncProtocol.writeUpdate(encoder, update);
-      this.broadcastMessage(encoding.toUint8Array(encoder));
+
+      const originConn = (origin && typeof origin === 'object' && 'send' in origin) ? origin as WebSocket : undefined;
+      this.broadcastMessage(encoding.toUint8Array(encoder), originConn);
 
       if (origin !== 'redis' && origin !== 'server-load') {
         appendOperation(this.name, 'server', update).catch(err => {
@@ -68,20 +71,28 @@ export class WSSharedDoc extends Y.Doc {
 
     // Subscribe to Redis for updates from other Fastify instances
     redisSubscriber.subscribe(`doc:${this.name}`);
-    redisSubscriber.on('messageBuffer', (channel, message) => {
+    this.redisListener = (channel: any, message: any) => {
       if (channel.toString() === `doc:${this.name}`) {
         // Apply update from Redis (origin='redis' prevents infinite loop)
         Y.applyUpdate(this, message, 'redis');
       }
-    });
+    };
+    redisSubscriber.on('messageBuffer', this.redisListener);
   }
 
-  broadcastMessage(message: Uint8Array) {
+  broadcastMessage(message: Uint8Array, excludeConn?: WebSocket) {
     this.conns.forEach((_, conn) => {
-      if (conn.readyState === wsReadyStateOpen) {
+      if (conn.readyState === wsReadyStateOpen && conn !== excludeConn) {
         conn.send(message);
       }
     });
+  }
+
+  destroy() {
+    redisSubscriber.unsubscribe(`doc:${this.name}`).catch(console.error);
+    redisSubscriber.off('messageBuffer', this.redisListener);
+    this.awareness.destroy();
+    super.destroy();
   }
 }
 
@@ -171,6 +182,11 @@ export async function setupWSConnection(conn: WebSocket, req: any, { docName = r
       if (controlledIds) {
         doc.conns.delete(conn);
         awarenessProtocol.removeAwarenessStates(doc.awareness, Array.from(controlledIds), null);
+      }
+
+      if (doc.conns.size === 0) {
+        doc.destroy();
+        docs.delete(docName);
       }
     }
   });

@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { setupDocument } from '@/lib/crdt';
 import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
+import { IndexeddbPersistence } from 'y-indexeddb';
 import { Loader2 } from 'lucide-react';
 
 // For simplicity, we are hardcoding a room ID.
@@ -18,9 +19,13 @@ export default function Home() {
   const isUpdatingRef = useRef(false);
 
   useEffect(() => {
-    // 1. Initialize the CRDT engine
-    const { ytext, wsProvider, indexeddbProvider } = setupDocument(DOCUMENT_ID);
+    let isMounted = true;
+    const ydoc = new Y.Doc();
+    const ytext = ydoc.getText('collaborative-text');
     ytextRef.current = ytext;
+
+    // 1. Offline Persistence (IndexedDB)
+    const indexeddbProvider = new IndexeddbPersistence(DOCUMENT_ID, ydoc);
 
     // 2. Observe changes from the CRDT (remote updates or offline load)
     const observeHandler = () => {
@@ -31,26 +36,46 @@ export default function Home() {
     };
     ytext.observe(observeHandler);
 
-    // 3. Setup WebSocket connection status handlers
-    wsProvider.on('status', (event: { status: string }) => {
-      if (event.status === 'connected') {
-        setStatus('Connected');
-        setIsOffline(false);
-      } else if (event.status === 'disconnected') {
-        setStatus('Disconnected - Working Offline');
-        setIsOffline(true);
-      }
-    });
+    let wsProvider: WebsocketProvider | null = null;
 
-    // 4. Initial state sync from IndexedDB
-    indexeddbProvider.on('synced', () => {
+    // 3. Wait for IndexedDB to load before connecting WebSocket
+    indexeddbProvider.whenSynced.then(() => {
+      if (!isMounted) {
+        indexeddbProvider.destroy();
+        return;
+      }
+
+      // Update UI with local offline state first
       setText(ytext.toString());
+
+      // 4. Realtime Synchronization (WebSockets)
+      wsProvider = new WebsocketProvider(
+        'ws://localhost:8080',
+        DOCUMENT_ID,
+        ydoc
+      );
+
+      wsProvider.on('status', (event: { status: string }) => {
+        if (isMounted) {
+          if (event.status === 'connected') {
+            setStatus('Connected');
+            setIsOffline(false);
+          } else if (event.status === 'disconnected') {
+            setStatus('Disconnected - Working Offline');
+            setIsOffline(true);
+          }
+        }
+      });
     });
 
     // Cleanup on unmount
     return () => {
+      isMounted = false;
       ytext.unobserve(observeHandler);
-      wsProvider.destroy();
+      if (wsProvider) {
+        wsProvider.destroy();
+      }
+      indexeddbProvider.destroy();
     };
   }, []);
 
