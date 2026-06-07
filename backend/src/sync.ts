@@ -1,7 +1,9 @@
 import * as Y from 'yjs';
 import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
-import { WebSocket } from 'ws';
+import * as encoding from 'lib0/encoding';
+import * as decoding from 'lib0/decoding';
+import { WebSocket, RawData } from 'ws';
 import { redisPublisher, redisSubscriber } from './redis';
 import { loadDocument, appendOperation } from './documentService';
 
@@ -11,6 +13,7 @@ const wsReadyStateOpen = 1;
 // Message types
 const messageSync = 0;
 const messageAwareness = 1;
+const messageQueryAwareness = 3;
 
 // In-memory cache of active documents
 const docs: Map<string, WSSharedDoc> = new Map();
@@ -36,19 +39,22 @@ export class WSSharedDoc extends Y.Doc {
         }
       }
       // broadcast awareness update
-      const encoder = new Uint8Array(awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients));
-      this.broadcastMessage(encoder);
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, messageAwareness);
+      encoding.writeVarUint8Array(
+        encoder,
+        awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients)
+      );
+      this.broadcastMessage(encoding.toUint8Array(encoder));
     };
 
     this.awareness.on('update', awarenessChangeHandler);
 
     this.on('update', (update: Uint8Array, origin: any) => {
-      // 1. Broadcast the update to all connected WebSockets
-      const encoder = new Uint8Array(update.length + 2);
-      encoder[0] = messageSync;
-      encoder[1] = syncProtocol.messageYjsUpdate;
-      encoder.set(update, 2);
-      this.broadcastMessage(encoder);
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, messageSync);
+      syncProtocol.writeUpdate(encoder, update);
+      this.broadcastMessage(encoding.toUint8Array(encoder));
 
       if (origin !== 'redis' && origin !== 'server-load') {
         appendOperation(this.name, 'server', update).catch(err => {
@@ -101,31 +107,55 @@ export async function setupWSConnection(conn: WebSocket, req: any, { docName = r
   doc.conns.set(conn, new Set());
 
   // Listen for messages from this client
-  conn.on('message', (message: ArrayBuffer) => {
+  conn.on('message', (message: RawData) => {
     try {
-      const messageView = new Uint8Array(message);
-      const messageType = messageView[0];
+      let messageView: Uint8Array;
+      if (Buffer.isBuffer(message)) {
+        messageView = new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
+      } else if (message instanceof ArrayBuffer) {
+        messageView = new Uint8Array(message);
+      } else if (Array.isArray(message)) {
+        const combined = Buffer.concat(message);
+        messageView = new Uint8Array(combined.buffer, combined.byteOffset, combined.byteLength);
+      } else {
+        return;
+      }
+
+      const decoder = decoding.createDecoder(messageView);
+      const messageType = decoding.readVarUint(decoder);
 
       if (messageType === messageSync) {
-        const syncMessageType = messageView[1];
+        const reply = encoding.createEncoder();
+        encoding.writeVarUint(reply, messageSync);
+        const syncMessageType = syncProtocol.readSyncMessage(decoder, reply, doc, conn);
+
+        if (encoding.length(reply) > 1) {
+          conn.send(encoding.toUint8Array(reply));
+        }
+
         if (syncMessageType === syncProtocol.messageYjsSyncStep1) {
-          const stateVector = messageView.slice(2);
-          const update = Y.encodeStateAsUpdateV2(doc, stateVector);
-          // Send SyncStep2 back
-          const response = new Uint8Array(update.length + 2);
-          response[0] = messageSync;
-          response[1] = syncProtocol.messageYjsSyncStep2;
-          response.set(update, 2);
-          conn.send(response);
-        } else if (syncMessageType === syncProtocol.messageYjsUpdate) {
-          const update = messageView.slice(2);
-          Y.applyUpdate(doc, update, conn);
-        } else if (syncMessageType === syncProtocol.messageYjsSyncStep2) {
-          const update = messageView.slice(2);
-          Y.applyUpdate(doc, update, conn);
+          const syncStep1 = encoding.createEncoder();
+          encoding.writeVarUint(syncStep1, messageSync);
+          syncProtocol.writeSyncStep1(syncStep1, doc);
+          conn.send(encoding.toUint8Array(syncStep1));
         }
       } else if (messageType === messageAwareness) {
-        awarenessProtocol.applyAwarenessUpdate(doc.awareness, messageView.slice(1), conn);
+        awarenessProtocol.applyAwarenessUpdate(
+          doc.awareness,
+          decoding.readVarUint8Array(decoder),
+          conn
+        );
+      } else if (messageType === messageQueryAwareness) {
+        const awarenessResponse = encoding.createEncoder();
+        encoding.writeVarUint(awarenessResponse, messageAwareness);
+        encoding.writeVarUint8Array(
+          awarenessResponse,
+          awarenessProtocol.encodeAwarenessUpdate(
+            doc.awareness,
+            Array.from(doc.awareness.getStates().keys())
+          )
+        );
+        conn.send(encoding.toUint8Array(awarenessResponse));
       }
     } catch (err) {
       console.error('Error processing message', err);
@@ -144,11 +174,4 @@ export async function setupWSConnection(conn: WebSocket, req: any, { docName = r
       }
     }
   });
-
-  const stateVector = Y.encodeStateVector(doc);
-  const sync1 = new Uint8Array(stateVector.length + 2);
-  sync1[0] = messageSync;
-  sync1[1] = syncProtocol.messageYjsSyncStep1;
-  sync1.set(stateVector, 2);
-  conn.send(sync1);
 }
