@@ -1,5 +1,4 @@
 import * as Y from 'yjs';
-import { encoding } from 'lib0';
 import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import { WebSocket } from 'ws';
@@ -40,7 +39,7 @@ export class WSSharedDoc extends Y.Doc {
       const encoder = new Uint8Array(awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients));
       this.broadcastMessage(encoder);
     };
-    
+
     this.awareness.on('update', awarenessChangeHandler);
 
     this.on('update', (update: Uint8Array, origin: any) => {
@@ -82,13 +81,13 @@ export class WSSharedDoc extends Y.Doc {
 
 export async function setupWSConnection(conn: WebSocket, req: any, { docName = req.url.slice(1).split('?')[0] } = {}) {
   conn.binaryType = 'arraybuffer';
-  
+
   // Get or create the document
   let doc = docs.get(docName);
   if (!doc) {
     doc = new WSSharedDoc(docName);
     docs.set(docName, doc);
-    
+
     // Load state from DB
     try {
       const dbDoc = await loadDocument(docName);
@@ -106,24 +105,24 @@ export async function setupWSConnection(conn: WebSocket, req: any, { docName = r
     try {
       const messageView = new Uint8Array(message);
       const messageType = messageView[0];
-      
+
       if (messageType === messageSync) {
         const syncMessageType = messageView[1];
         if (syncMessageType === syncProtocol.messageYjsSyncStep1) {
-           const stateVector = messageView.slice(2);
-           const update = Y.encodeStateAsUpdateV2(doc, stateVector);
-           // Send SyncStep2 back
-           const response = new Uint8Array(update.length + 2);
-           response[0] = messageSync;
-           response[1] = syncProtocol.messageYjsSyncStep2;
-           response.set(update, 2);
-           conn.send(response);
+          const stateVector = messageView.slice(2);
+          const update = Y.encodeStateAsUpdateV2(doc, stateVector);
+          // Send SyncStep2 back
+          const response = new Uint8Array(update.length + 2);
+          response[0] = messageSync;
+          response[1] = syncProtocol.messageYjsSyncStep2;
+          response.set(update, 2);
+          conn.send(response);
         } else if (syncMessageType === syncProtocol.messageYjsUpdate) {
-           const update = messageView.slice(2);
-           Y.applyUpdate(doc, update, conn);
+          const update = messageView.slice(2);
+          Y.applyUpdate(doc, update, conn);
         } else if (syncMessageType === syncProtocol.messageYjsSyncStep2) {
-           const update = messageView.slice(2);
-           Y.applyUpdate(doc, update, conn);
+          const update = messageView.slice(2);
+          Y.applyUpdate(doc, update, conn);
         }
       } else if (messageType === messageAwareness) {
         awarenessProtocol.applyAwarenessUpdate(doc.awareness, messageView.slice(1), conn);
