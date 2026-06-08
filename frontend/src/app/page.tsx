@@ -50,7 +50,7 @@ graph TD
 function EditorApp() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  
+
   const [documentId, setDocumentId] = useState<string>('');
   const [text, setText] = useState('');
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
@@ -274,7 +274,7 @@ function EditorApp() {
             <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">{statusLabel}</span>
           </div>
           <a
-            href="https://github.com/tanishq/syncengine-collab"
+            href="https://github.com/randomfunction/SyncEngine"
             target="_blank"
             rel="noopener noreferrer"
             className="text-slate-400 hover:text-slate-700 transition-colors"
@@ -286,7 +286,7 @@ function EditorApp() {
 
       {/* Main Content (Split Layout) */}
       <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-        
+
         {/* Left Column: Editor */}
         <section className="flex-1 flex flex-col p-6 lg:border-r border-slate-200 bg-slate-50">
           <div className="mb-4 flex items-center justify-between">
@@ -297,7 +297,7 @@ function EditorApp() {
               Room: {documentId}
             </span>
           </div>
-          
+
           <div className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-400 transition-all">
             <textarea
               value={text}
@@ -317,7 +317,7 @@ function EditorApp() {
               Strong Eventual Consistency (SEC) via CRDTs. Raw binary deltas over WebSockets.
             </p>
           </div>
-          
+
           <div className="flex-1 bg-slate-50 rounded-xl border border-slate-200 p-4 min-h-[400px]">
             <Mermaid chart={MERMAID_CHART} />
           </div>
