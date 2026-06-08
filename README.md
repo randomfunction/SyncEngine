@@ -160,8 +160,3 @@ npm run benchmark
 - **Binary Protocols are Non-Negotiable:** At scale, JSON overhead kills performance. Moving to `Uint8Array` was critical for sub-5ms latencies.
 - **Eventual Consistency != Chaos:** Designing for SEC requires a strict understanding of commutativity in distributed state.
 - **Pub/Sub Sharding:** Room-based sharding is the most effective way to prevent a single "hot" document from degrading the entire cluster.
-
----
-
-## License
-Distributed under the MIT License.

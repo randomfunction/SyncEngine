@@ -8,32 +8,10 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String     @id @default(uuid())
-  name      String
-  email     String     @unique
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
-  documents Document[]
-}
-
-model Document {
-  id        String     @id @default(uuid())
-  title     String     @default("Untitled Document")
-  ownerId   String
-  owner     User       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
-
-  operations Operation[]
-  snapshots  Snapshot[]
-}
-
 // Append-only event store for CRDT operations
 model Operation {
   id         String   @id @default(uuid())
   documentId String
-  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   
   // Who generated this operation
   clientId   String   
@@ -53,7 +31,6 @@ model Operation {
 model Snapshot {
   id         String   @id @default(uuid())
   documentId String
-  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   // The full binary state of the Yjs document at this point in time
   state      Bytes

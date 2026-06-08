@@ -8,7 +8,7 @@ import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
 
 const DOCUMENT_ID = 'demo-room-1';
-const WS_URL = 'ws://localhost:8080';
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
 
 const messageSync = 0;
 const messageAwareness = 1;

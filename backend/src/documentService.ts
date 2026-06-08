@@ -2,44 +2,6 @@ import { PrismaClient } from '@prisma/client';
 import * as Y from 'yjs';
 
 const prisma = new PrismaClient();
-const nonPersistentDocuments = new Set<string>();
-const persistentDocuments = new Set<string>();
-const documentExistenceChecks = new Map<string, Promise<boolean>>();
-
-async function canPersistDocument(documentId: string) {
-  if (persistentDocuments.has(documentId)) {
-    return true;
-  }
-
-  if (nonPersistentDocuments.has(documentId)) {
-    return false;
-  }
-
-  const pendingCheck = documentExistenceChecks.get(documentId);
-  if (pendingCheck) {
-    return pendingCheck;
-  }
-
-  const existenceCheck = prisma.document.findUnique({
-    where: { id: documentId },
-    select: { id: true },
-  }).then((documentExists) => {
-    if (documentExists) {
-      persistentDocuments.add(documentId);
-      return true;
-    }
-
-    nonPersistentDocuments.add(documentId);
-    console.warn(`Skipping persistence for transient document "${documentId}" because no Document row exists.`);
-    return false;
-  }).finally(() => {
-    documentExistenceChecks.delete(documentId);
-  });
-
-  documentExistenceChecks.set(documentId, existenceCheck);
-  return existenceCheck;
-}
-
 /**
  * Loads a Yjs document from the database by replaying operations
  * and loading the latest snapshot if available.
@@ -86,15 +48,6 @@ export async function loadDocument(documentId: string): Promise<Y.Doc> {
 export async function appendOperation(documentId: string, clientId: string, updatePayload: Uint8Array) {
   // To avoid race conditions on the sequence clock, we rely on the database's transactional guarantees
   // or a monotonic sequence generator. Here we simply use an incrementing clock per document.
-  if (nonPersistentDocuments.has(documentId)) {
-    return;
-  }
-
-  const documentExists = await canPersistDocument(documentId);
-  if (!documentExists) {
-    return;
-  }
-
   await prisma.$transaction(async (tx) => {
     // Get the current max clock for this document
     const lastOp = await tx.operation.findFirst({
