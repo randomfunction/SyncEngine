@@ -1,102 +1,206 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import * as Y from 'yjs';
-import { WebsocketProvider } from 'y-websocket';
-import { IndexeddbPersistence } from 'y-indexeddb';
-import { Loader2 } from 'lucide-react';
+import * as encoding from 'lib0/encoding';
+import * as decoding from 'lib0/decoding';
+import * as syncProtocol from 'y-protocols/sync';
+import * as awarenessProtocol from 'y-protocols/awareness';
 
-// For simplicity, we are hardcoding a room ID.
 const DOCUMENT_ID = 'demo-room-1';
+const WS_URL = 'ws://localhost:8080';
+
+const messageSync = 0;
+const messageAwareness = 1;
 
 export default function Home() {
   const [text, setText] = useState('');
-  const [status, setStatus] = useState('Connecting...');
-  const [isOffline, setIsOffline] = useState(false);
-  
-  // Refs to hold the CRDT instances without triggering re-renders
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+
+  const ydocRef = useRef<Y.Doc | null>(null);
   const ytextRef = useRef<Y.Text | null>(null);
-  const isUpdatingRef = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const isLocalUpdate = useRef(false);
+  const isSynced = useRef(false);
+
+  // Send a binary message over the WebSocket
+  const sendMessage = useCallback((msg: Uint8Array) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(msg);
+    }
+  }, []);
 
   useEffect(() => {
-    let isMounted = true;
     const ydoc = new Y.Doc();
     const ytext = ydoc.getText('collaborative-text');
+    ydocRef.current = ydoc;
     ytextRef.current = ytext;
 
-    // 1. Offline Persistence (IndexedDB)
-    const indexeddbProvider = new IndexeddbPersistence(DOCUMENT_ID, ydoc);
-
-    // 2. Observe changes from the CRDT (remote updates or offline load)
-    const observeHandler = () => {
-      // Prevent our own local React state updates from causing an infinite loop
-      if (!isUpdatingRef.current) {
+    // ---- CRDT Observer: Update React state when the CRDT changes ----
+    const observer = () => {
+      if (!isLocalUpdate.current) {
         setText(ytext.toString());
       }
     };
-    ytext.observe(observeHandler);
+    ytext.observe(observer);
 
-    let wsProvider: WebsocketProvider | null = null;
+    // ---- Yjs update handler: Forward local updates to server ----
+    const updateHandler = (update: Uint8Array, origin: any) => {
+      if (origin === 'remote') return; // Don't echo remote updates back
 
-    // 3. Wait for IndexedDB to load before connecting WebSocket
-    indexeddbProvider.whenSynced.then(() => {
-      if (!isMounted) {
-        indexeddbProvider.destroy();
-        return;
-      }
-
-      // Update UI with local offline state first
-      setText(ytext.toString());
-
-      // 4. Realtime Synchronization (WebSockets)
-      wsProvider = new WebsocketProvider(
-        'ws://localhost:8080',
-        DOCUMENT_ID,
-        ydoc
-      );
-
-      wsProvider.on('status', (event: { status: string }) => {
-        if (isMounted) {
-          if (event.status === 'connected') {
-            setStatus('Connected');
-            setIsOffline(false);
-          } else if (event.status === 'disconnected') {
-            setStatus('Disconnected - Working Offline');
-            setIsOffline(true);
-          }
-        }
-      });
-    });
-
-    // Cleanup on unmount
-    return () => {
-      isMounted = false;
-      ytext.unobserve(observeHandler);
-      if (wsProvider) {
-        wsProvider.destroy();
-      }
-      indexeddbProvider.destroy();
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, messageSync);
+      syncProtocol.writeUpdate(encoder, update);
+      sendMessage(encoding.toUint8Array(encoder));
     };
-  }, []);
+    ydoc.on('update', updateHandler);
 
-  // Handle local typing
+    // ---- WebSocket connection ----
+    let ws: WebSocket | null = null;
+    let destroyed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function connect() {
+      if (destroyed) return;
+
+      setStatus('connecting');
+      isSynced.current = false;
+
+      ws = new WebSocket(`${WS_URL}/${DOCUMENT_ID}`);
+      ws.binaryType = 'arraybuffer';
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setStatus('connected');
+
+        // Send SyncStep1: our state vector so the server knows what we have
+        const encoder = encoding.createEncoder();
+        encoding.writeVarUint(encoder, messageSync);
+        syncProtocol.writeSyncStep1(encoder, ydoc);
+        sendMessage(encoding.toUint8Array(encoder));
+      };
+
+      ws.onmessage = (event: MessageEvent) => {
+        if (destroyed) return;
+
+        const data = event.data;
+        let buf: Uint8Array;
+        if (data instanceof ArrayBuffer) {
+          buf = new Uint8Array(data);
+        } else {
+          return; // ignore text frames
+        }
+
+        if (buf.byteLength === 0) return;
+
+        try {
+          const decoder = decoding.createDecoder(buf);
+          const messageType = decoding.readVarUint(decoder);
+
+          if (messageType === messageSync) {
+            const replyEncoder = encoding.createEncoder();
+            encoding.writeVarUint(replyEncoder, messageSync);
+
+            syncProtocol.readSyncMessage(decoder, replyEncoder, ydoc, 'remote');
+
+            // If readSyncMessage produced a reply (e.g. SyncStep2), send it
+            if (encoding.length(replyEncoder) > 1) {
+              sendMessage(encoding.toUint8Array(replyEncoder));
+            }
+
+            if (!isSynced.current) {
+              isSynced.current = true;
+              setText(ytext.toString());
+            }
+          } else if (messageType === messageAwareness) {
+            // We don't track awareness in this minimal UI, but parse it to avoid errors
+          }
+        } catch (err) {
+          console.error('Failed to process WS message:', err);
+        }
+      };
+
+      ws.onclose = () => {
+        wsRef.current = null;
+        if (!destroyed) {
+          setStatus('disconnected');
+          // Reconnect with backoff
+          reconnectTimer = setTimeout(connect, 2000);
+        }
+      };
+
+      ws.onerror = () => {
+        // onclose will fire after this, triggering reconnect
+      };
+    }
+
+    connect();
+
+    // ---- Cleanup ----
+    return () => {
+      destroyed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ytext.unobserve(observer);
+      ydoc.off('update', updateHandler);
+      if (ws) {
+        ws.onclose = null; // prevent reconnect on intentional close
+        ws.close();
+      }
+      ydoc.destroy();
+    };
+  }, [sendMessage]);
+
+  // ---- Handle local typing with minimal diff ----
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newText = e.target.value;
-    setText(newText); // Optimistic UI update
+    setText(newText);
 
-    // Apply the delta to the CRDT
-    if (ytextRef.current) {
-      isUpdatingRef.current = true;
-      
-      // In a robust implementation, you compute the exact text diff (e.g., using fast-diff)
-      // Here, for demonstration simplicity, we replace the entire string if it changed.
-      // Yjs handles the binary encoding and vector clock incrementing automatically.
-      ytextRef.current.delete(0, ytextRef.current.length);
-      ytextRef.current.insert(0, newText);
-      
-      isUpdatingRef.current = false;
+    const ytext = ytextRef.current;
+    if (!ytext) return;
+
+    isLocalUpdate.current = true;
+
+    const oldText = ytext.toString();
+
+    // Find first differing character
+    let start = 0;
+    while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
+      start++;
     }
+
+    // Find last differing character from end
+    let oldEnd = oldText.length;
+    let newEnd = newText.length;
+    while (oldEnd > start && newEnd > start && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+      oldEnd--;
+      newEnd--;
+    }
+
+    // Apply surgical diff
+    const deleteCount = oldEnd - start;
+    if (deleteCount > 0) {
+      ytext.delete(start, deleteCount);
+    }
+    const insertStr = newText.slice(start, newEnd);
+    if (insertStr.length > 0) {
+      ytext.insert(start, insertStr);
+    }
+
+    isLocalUpdate.current = false;
   };
+
+  const statusColor = {
+    connecting: 'bg-amber-500',
+    connected: 'bg-emerald-500',
+    disconnected: 'bg-red-500',
+  }[status];
+
+  const statusLabel = {
+    connecting: 'Connecting…',
+    connected: 'Live',
+    disconnected: 'Offline — Reconnecting…',
+  }[status];
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-200 flex flex-col items-center justify-center p-8 font-sans">
@@ -105,22 +209,19 @@ export default function Home() {
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/50">
           <div>
             <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent">
-              Realtime CRDT Engine
+              SyncEngine — CRDT Collaborative Editor
             </h1>
             <p className="text-xs text-slate-500 mt-1">Room: {DOCUMENT_ID}</p>
           </div>
-          
+
           <div className="flex items-center gap-3">
-            <span className={`flex h-3 w-3 relative ${isOffline ? 'text-red-500' : 'text-emerald-500'}`}>
-              {!isOffline && (
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative flex h-3 w-3">
+              {status === 'connected' && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
               )}
-              <span className={`relative inline-flex rounded-full h-3 w-3 ${isOffline ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
+              <span className={`relative inline-flex rounded-full h-3 w-3 ${statusColor}`} />
             </span>
-            <span className="text-sm font-medium text-slate-300 flex items-center gap-2">
-              {status === 'Connecting...' && <Loader2 className="w-4 h-4 animate-spin" />}
-              {status}
-            </span>
+            <span className="text-sm font-medium text-slate-300">{statusLabel}</span>
           </div>
         </div>
 
@@ -129,18 +230,17 @@ export default function Home() {
           <textarea
             value={text}
             onChange={handleTextChange}
-            placeholder="Start typing... changes synchronize instantly across clients."
+            placeholder="Start typing… changes sync instantly across clients."
             className="w-full h-[500px] bg-slate-950 border border-slate-800 rounded-xl p-6 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none font-mono text-sm leading-relaxed"
-            spellCheck="false"
+            spellCheck={false}
           />
         </div>
       </div>
 
       <div className="mt-8 text-center max-w-2xl text-sm text-slate-500 leading-relaxed">
         <p>
-          This demonstrates strong eventual consistency (SEC) using Yjs.
-          Every keystroke is converted into a deterministic binary delta, broadcasted via WebSockets,
-          routed through Redis Pub/Sub, and appended to a causal event log in PostgreSQL.
+          Strong Eventual Consistency via Yjs CRDTs. Binary deltas over raw WebSockets.
+          No y-websocket provider — direct protocol integration for zero overhead.
         </p>
       </div>
     </main>

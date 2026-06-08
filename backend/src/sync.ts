@@ -143,13 +143,6 @@ export async function setupWSConnection(conn: WebSocket, req: any, { docName = r
         if (encoding.length(reply) > 1) {
           conn.send(encoding.toUint8Array(reply));
         }
-
-        if (syncMessageType === syncProtocol.messageYjsSyncStep1) {
-          const syncStep1 = encoding.createEncoder();
-          encoding.writeVarUint(syncStep1, messageSync);
-          syncProtocol.writeSyncStep1(syncStep1, doc);
-          conn.send(encoding.toUint8Array(syncStep1));
-        }
       } else if (messageType === messageAwareness) {
         awarenessProtocol.applyAwarenessUpdate(
           doc.awareness,
