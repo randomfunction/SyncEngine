@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: crdt_postgres_cluster
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: crdt_engine
+    volumes:
+      - pgdata_cluster:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: crdt_redis_cluster
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata_cluster:/data
+
+  backend-1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sync_backend_1
+    environment:
+      DATABASE_URL: "postgresql://postgres:password@postgres:5432/crdt_engine?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      PORT: "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    # No ports exposed directly to host; NGINX will proxy to it
+
+  backend-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sync_backend_2
+    environment:
+      DATABASE_URL: "postgresql://postgres:password@postgres:5432/crdt_engine?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      PORT: "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    # No ports exposed directly to host; NGINX will proxy to it
+
+  nginx:
+    image: nginx:alpine
+    container_name: sync_nginx
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend-1
+      - backend-2
+
+volumes:
+  pgdata_cluster:
+  redisdata_cluster:

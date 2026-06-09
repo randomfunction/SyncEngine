@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph "Load Balancing"
-        LB[NLB / Reverse Proxy]
+        LB[NGINX Reverse Proxy]
     end
 
     subgraph "Application Fleet"

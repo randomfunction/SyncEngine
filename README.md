@@ -1,19 +1,12 @@
-# Distributed CRDT Middleware
+# SyncEngine: Distributed CRDT Synchronization 
 
-[![Node.js](https://img.shields.io/badge/Node.js-339933?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Yjs](https://img.shields.io/badge/CRDT-Yjs-B31B1B?style=flat-square)](https://yjs.dev/)
-[![WebSockets](https://img.shields.io/badge/WebSockets-ws-010101?style=flat-square)](https://github.com/websockets/ws)
-[![Redis](https://img.shields.io/badge/Redis-Pub%2FSub-DC382D?style=flat-square&logo=redis&logoColor=white)](https://redis.io/)
-[![Prisma](https://img.shields.io/badge/Persistence-Prisma-2D3748?style=flat-square&logo=prisma&logoColor=white)](https://www.prisma.io/)
+SyncEngine is a custom, high-performance distributed backend for real-time collaborative applications (like Figma or Notion). It uses Conflict-free Replicated Data Types (CRDTs) to guarantee Strong Eventual Consistency (SEC) across multiple clients connected to different nodes in a distributed cluster.
 
-SyncEngine is a high-performance, distributed synchronization backend designed for real-time collaborative applications (e.g., Figma, Notion). It implements **Conflict-free Replicated Data Types (CRDTs)** to provide **Strong Eventual Consistency (SEC)** across distributed clients without the need for complex, error-prone Operational Transformation (OT) or central lock management.
+Instead of relying on heavy out-of-the-box solutions or central locking mechanisms, I built this system from the ground up to solve the N² problem of WebSocket broadcasting using a stateless Node.js fleet and Redis Pub/Sub.
 
----
+## Architecture
 
-## Architecture Overview
-
-The system is designed as a stateless WebSocket fleet backed by a Redis Pub/Sub layer for inter-node communication and a PostgreSQL operation log for durable persistence.
+The system is designed to scale horizontally. Clients establish persistent WebSocket connections through an NGINX load balancer. The backend nodes are completely stateless—they compute missing deltas based on client state vectors and rely on Redis to fan out updates to other nodes. 
 
 ```mermaid
 graph TD
@@ -24,7 +17,7 @@ graph TD
     end
 
     subgraph "Load Balancing"
-        LB[NLB / Reverse Proxy]
+        LB[NGINX Reverse Proxy]
     end
 
     subgraph "Application Fleet"
@@ -48,115 +41,41 @@ graph TD
     S2 -- Async Append --> DB
 ```
 
----
+## Engineering Decisions & Tradeoffs
 
-## Engineering Design Decisions
+### 1. CRDTs over Operational Transformation (OT)
+Standard collaborative editors (like older Google Docs) use OT, which requires a central "canonical" server to sequence operations. This becomes a bottleneck at scale. By using CRDTs (via Yjs), updates become commutative. Any node can apply operations in any order without conflicts, meaning the backend fleet can be completely decentralized and stateless.
 
-### 1. CRDTs vs. Operational Transformation (OT)
-While OT (used by Google Docs) requires a central "canonical" server to transform operations based on concurrent edits, SyncEngine uses **CRDTs (via Yjs)**.
-- **Why?** CRDTs are mathematically designed to be commutative and associative. This allows updates to be applied in any order across distributed nodes while guaranteed to converge to the same state. It significantly simplifies horizontal scaling as there is no single point of truth for conflict resolution.
+### 2. Custom Binary Handshakes vs. Standard y-websocket
+Initially, I prototyped with the standard `y-websocket` provider. However, it led to infinite handshake loops and massive memory overhead when handling persistent DB connections. I stripped it out and wrote a custom raw WebSocket protocol. 
+Clients now send a compact **State Vector** on connection. The server computes the binary difference (`lib0` encoding) and transmits only the missing operations. This dropped payload sizes by roughly 10x compared to JSON arrays.
 
-### 2. Synchronization Protocol: State Vector Exchange
-SyncEngine implements a multi-step handshake to minimize data transfer:
-- **Step 1 (Discovery):** Client sends its **State Vector** (a compact summary of known updates/clocks).
-- **Step 2 (Diffing):** The server computes the missing deltas between its local state and the client's vector.
-- **Step 3 (Propagation):** Only the missing binary updates are transmitted.
-- **Result:** Minimal bandwidth usage even for large documents with long histories.
+### 3. Redis Pub/Sub for Fleet Sync
+To allow horizontal scaling behind NGINX, the servers must communicate. When Server A receives a local update from Client 1, it applies the update to its in-memory document, then publishes the raw binary delta to a Redis channel specific to that document ID (`doc:xyz`). Server B receives this pub/sub event and broadcasts it to Client 2.
 
-### 3. Binary Delta Propagation
-Instead of bulky JSON payloads, SyncEngine utilizes **lib0 encoding**. Updates are propagated as raw `Uint8Array` deltas.
-- **Efficiency:** Binary encoding reduces payload size by up to 10x compared to JSON, reducing GC pressure and network ingress/egress costs.
+### 4. Async Postgres Oplog
+The primary source of truth for the session is in memory across the CRDT peers. To guarantee persistence without blocking real-time typing, the backend treats PostgreSQL strictly as an append-only operation log. Updates are flushed asynchronously.
 
----
+## Running the Cluster Locally
 
-## Horizontal Scaling Model
+I configured a Docker Compose environment that perfectly mimics a production distributed system. It boots an NGINX load balancer, multiple Node.js backends, Redis, and Postgres.
 
-SyncEngine is designed to scale horizontally across multiple instances:
-- **Room-based Pub/Sub:** Every document is mapped to a Redis channel (`doc:${id}`).
-- **Event Fanout:** When a client on Server A pushes an update, Server A applies it locally, publishes it to Redis, and Server B (holding connections for other clients in the same room) consumes it to broadcast to its connected peers.
-- **Statelessness:** Since the CRDT state is consistent across any node that applies the updates, clients can reconnect to any server in the fleet and resume work seamlessly.
+1. Ensure Docker is running.
+2. Spin up the entire cluster:
+   ```bash
+   docker compose -f docker-compose.cluster.yml up --build
+   ```
+3. Start the Next.js frontend:
+   ```bash
+   cd frontend
+   npm install --legacy-peer-deps
+   npm run dev
+   ```
 
----
+When you visit `http://localhost:3000`, NGINX (`localhost:8080`) will route your WebSocket connection to one of the backend nodes. Open a second browser, and NGINX will load balance it. As you type, you can watch the state sync perfectly across the cluster via Redis.
 
-## Persistence & Durability Strategy
-
-The system treats the database as an **Append-only Operation Log**:
-- **Async Append:** Updates are broadcasted to WebSockets immediately for low latency, while a background process asynchronously appends the binary deltas to PostgreSQL.
-- **Snapshotting (Planned):** Periodic squashing of operations into a base snapshot to prevent long replay times during initial document load.
-- **Consistency Guarantee:** The system prioritizes availability for real-time edits, with eventual durability in the persistent store.
-
----
-
-## Performance Benchmarks
-
-Simulated using an internal load-testing suite with 100 concurrent clients performing rapid insertions into a shared document.
-
-| Metric | Result | Interpretation |
-| :--- | :--- | :--- |
-| **Total Operations** | 1,000 | Baseline for consistency validation |
-| **Throughput** | 800.00 ops/sec | Sustained message fanout across the fleet |
-| **P95 Latency** | 4.5 ms | Tail latency under moderate contention |
-| **Average Latency** | 2.1 ms | Round-trip overhead (Server processing + Pub/Sub) |
-
-### Scalability Bottlenecks
-- **WebSocket Fanout:** The primary bottleneck is the CPU cost of serializing/deserializing messages for hundreds of concurrent clients in a single room (N² problem).
-- **Redis Throughput:** At extreme scale (100k+ concurrent rooms), Redis Pub/Sub bandwidth becomes a bottleneck, requiring cluster sharding.
-
----
-
-## Internal Implementation Details
-
-### Consistency Guarantees
-- **Strong Eventual Consistency (SEC):** All nodes converge once they have received the same set of updates.
-- **Causal Ordering:** Internal logic ensures that dependent operations are applied in the correct sequence using vector clocks.
-
-### Failure Handling
-- **Graceful Reconnect:** Clients implement an exponential backoff strategy. Upon reconnect, the **State Vector handshake** automatically resolves any updates missed during the downtime.
-- **Idempotent Updates:** The Yjs engine ignores duplicate updates, making the synchronization protocol resilient to network retries.
-
----
-
-## Project Structure
-
-```text
-backend/
-├── src/
-│   ├── sync.ts             # Core CRDT Logic & Y-Protocols bridge
-│   ├── index.ts            # Fastify WS Server & Connection Management
-│   ├── redis.ts            # High-throughput Pub/Sub Client
-│   ├── documentService.ts  # Prisma Durability Layer (Oplog)
-│   └── benchmark.ts        # Automated Latency/Throughput Testing
-architecture/
-├── system_design.md        # Deep dive into distributed patterns
-└── roadmap.md              # Scaling & Feature pipeline
-```
-
----
-
-## Getting Started
-
-### Prerequisites
-- Node.js v20+
-- Redis 7.0+
-- PostgreSQL 15+
-
-### Installation & Benchmarking
-```bash
-# Setup Backend
-cd backend
-npm install
-npx prisma db push
-
-# Start Dev Server
-npm run dev
-
-# Run Load Test
-npm run benchmark
-```
-
----
-
-## Key Engineering Learnings
-- **Binary Protocols are Non-Negotiable:** At scale, JSON overhead kills performance. Moving to `Uint8Array` was critical for sub-5ms latencies.
-- **Eventual Consistency != Chaos:** Designing for SEC requires a strict understanding of commutativity in distributed state.
-- **Pub/Sub Sharding:** Room-based sharding is the most effective way to prevent a single "hot" document from degrading the entire cluster.
+## Tech Stack
+- **Frontend**: Next.js 14, React 19, TailwindCSS, Lucide
+- **Backend**: Node.js, Fastify, raw `ws`
+- **State/CRDT**: Yjs, lib0 binary encoding
+- **Infrastructure**: Docker, NGINX, Redis, PostgreSQL (Prisma)
