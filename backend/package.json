@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@prisma/client": "^5.13.0",
+    "bullmq": "^5.7.8",
     "dotenv": "^16.4.5",
     "fastify": "^4.26.2",
     "fastify-plugin": "^4.5.1",

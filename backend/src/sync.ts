@@ -7,6 +7,8 @@ import { WebSocket, RawData } from 'ws';
 import { redisPublisher, redisSubscriber } from './redis';
 import { loadDocument, appendOperation } from './documentService';
 
+import { snapshotQueue } from './snapshotWorker';
+
 const wsReadyStateConnecting = 0;
 const wsReadyStateOpen = 1;
 
@@ -17,6 +19,9 @@ const messageQueryAwareness = 3;
 
 // In-memory cache of active documents
 const docs: Map<string, WSSharedDoc> = new Map();
+
+// In-memory counter for threshold snapshotting
+const opCounter = new Map<string, number>();
 
 export class WSSharedDoc extends Y.Doc {
   name: string;
@@ -66,6 +71,16 @@ export class WSSharedDoc extends Y.Doc {
 
         // 3. Publish to Redis so other server instances know about this update
         redisPublisher.publish(`doc:${this.name}`, Buffer.from(update)).catch(console.error);
+
+        // 4. Threshold snapshotting via BullMQ
+        const currentCount = (opCounter.get(this.name) || 0) + 1;
+        if (currentCount >= 100) {
+          opCounter.set(this.name, 0);
+          console.log(`[Sync] Threshold reached for ${this.name}, pushing to snapshot queue`);
+          snapshotQueue.add('createSnapshot', { documentId: this.name }).catch(console.error);
+        } else {
+          opCounter.set(this.name, currentCount);
+        }
       }
     });
 

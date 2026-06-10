@@ -19,6 +19,7 @@ async function runDiagnostics() {
 runDiagnostics();
 
 import { setupWSConnection } from './sync';
+import { startSnapshotWorker } from './snapshotWorker';
 
 const port = parseInt(process.env.PORT || '8080', 10);
 const fastify = Fastify({ logger: true });
@@ -41,6 +42,9 @@ const start = async () => {
     // Start Fastify to attach to HTTP
     await fastify.listen({ port, host: '0.0.0.0' });
     fastify.log.info(`Server listening on port ${port}`);
+
+    // Start background queue workers
+    startSnapshotWorker();
 
     // We attach the WebSocket server to Fastify's raw HTTP server
     const wss = new WebSocketServer({ server: fastify.server });
